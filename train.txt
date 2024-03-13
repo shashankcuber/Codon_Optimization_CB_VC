@@ -1,0 +1,432 @@
+import argparse
+import torch
+import pandas as pd
+import wandb
+from tqdm.auto import tqdm as tqdm
+from models.RNN import RNNModel
+from data_preprocessing import start_preprocessing
+from utils.util import get_batch_cai
+from utils.custom_loss import CAI_LOSS, CrossEntropyLoss, SoftmaxCAI
+
+
+# wandb config for login
+wandb.login(key = "")
+
+#setting device
+device = torch.device('cpu')
+print(device)
+
+class Train:
+    def __init__(self, dataset_path, lambda_val=1):
+        self.dataset_path = dataset_path
+        self.lambda_val = lambda_val
+
+    def get_token_dict_and_DataLoader(self):
+        train_loader, val_loader, test_loader, ref_seq_cds, cds_token_dict = start_preprocessing(self.dataset_path)
+        # print(type(cds_token_dict))
+        return train_loader, val_loader, test_loader, ref_seq_cds, cds_token_dict
+    
+    
+    def get_pad_trimmed_cds_data(self, cds_data, max_seq_len):
+        cds_data_trimmed = []
+        for id, seq in enumerate(cds_data):
+            # print(type(seq))
+            cds_data_trimmed.append(seq[0:max_seq_len])
+        
+        cds_data_trimmed = torch.stack(cds_data_trimmed)
+        return cds_data_trimmed
+
+    def get_padded_output(self,output_seq_logits, seq_lens):
+        
+        for i in range(0, len(seq_lens)):
+            output_seq_logits[i][seq_lens[i]:][:] = 0
+        
+        return output_seq_logits
+        
+    def get_correct_tags(self, output_seq_logits, cds_data, seq_lens):
+        """
+
+        Args:
+            output_seq_logits (tensor): Output of the model
+            cds_data (tensor): Target data
+            seq_lens (tensor): Length of sequences in the batch
+
+        Returns:
+            right_token (integer): Number of correctly predicted tokens here codons
+            total_tokens (integer): Total number of tokens here codons
+        """
+        right_token =0
+        total_tokens = 0
+        for i in range(0, len(seq_lens)):
+            seq_i = torch.argmax(output_seq_logits[i], dim=-1)
+            # Excluding Start and Stop codons
+            seq_i = seq_i[:seq_lens[i]]
+            cds_data_i = cds_data[i][:seq_lens[i]]
+            total_tokens += len(cds_data_i)
+            # get token wise accuracy
+            for j in range(0, len(seq_i)):
+                if seq_i[j] == cds_data_i[j]:
+                    right_token += 1
+        
+        return right_token, total_tokens
+
+    def train(self, cai_type, mask, test=False):
+        """
+
+        Args:
+            cai_type (str): Description of how CAI loss is to be calculated
+            mask (str): Description of how masking is to be done during training
+            test (bool): Flag to indicate if the model is to be tested or trained or both
+
+       """
+        _, _, _, ref_seq_cds, cds_token_dict = self.get_token_dict_and_DataLoader()
+        train_loader = torch.load('./ch_data/train_loader-ch.pt')
+        val_loader = torch.load('./ch_data/val_loader-ch.pt')
+        test_loader = torch.load('./ch_data/test_loader-ch.pt')
+        # Model
+        model = RNNModel().to(device)
+        # print("MODEL INITIALIZED")
+
+        # Loss and optimizer
+        cross_entropy_loss = CrossEntropyLoss(device)
+        # print("CAI loss dict type", type(cds_token_dict))
+        if cai_type == "log":
+            cai_loss = CAI_LOSS(cds_token_dict=cds_token_dict, ref_seqs=ref_seq_cds).to(device)
+        elif cai_type == "softmax":
+            cai_loss = SoftmaxCAI(cds_token_dict=cds_token_dict, ref_seqs=ref_seq_cds).to(device)
+
+        optimizer = torch.optim.Adam(model.parameters(), lr=0.001)
+
+       
+        print(model)
+        print("\n")
+
+        # Train Network
+    
+        best_val_loss = float('inf')
+        best_train_loss = float('inf')
+        patience = 5
+        patience_counter = 0
+
+        num_epochs = 30
+        train_losses_epoch = []
+        val_losses_epoch = []
+    
+        train_accuracy_epoch = []
+        val_accuracy_epoch = []
+
+        train_config = {
+            "num_epochs": num_epochs,
+            "batch_size": 32,
+            "optimizer": "Adam",
+            "learning_rate": 0.001,
+            "lambda": self.lambda_val,
+            "patience": patience,
+            "cai_type": cai_type,
+            "mask": mask,
+            "num_sequences": 38000
+        }
+
+        run = wandb.init(reinit = True, project="Codon-Optimization-ch", config = train_config)
+        
+
+        if test == False:
+            print("!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! TRAINING STARTED !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
+            print(".")
+            print(".")
+            print(".")
+            print(".")
+            for epoch in range(num_epochs):
+                model.train().to(device)
+                model.zero_grad()
+                train_loss = 0
+                l1_loss_train = 0
+                l2_loss_train = 0
+                train_batch_count = 1
+                right_tags_train = 0
+                total_tags_train = 0
+
+                for i in (range(0,len(train_loader))):
+                    # Get data to cuda if possible
+                    wandb.watch(model, cross_entropy_loss, log=None, log_freq=20)
+
+                    aa_data, cds_data = next(iter(train_loader))
+
+                    seq_lens = torch.sum(cds_data != 0, dim=1)
+                    
+                    # getting the seq_lens in descending order
+                    seq_lens, sorted_index = torch.sort(seq_lens, descending=True)
+                    
+                    max_seq_len = max(seq_lens)
+
+                    aa_data_sorted = []
+                    cds_data_sorted = []
+                    for i in range(0, len(sorted_index)):
+                        aa_data_sorted.append(aa_data[sorted_index[i]])
+                        cds_data_sorted.append(cds_data[sorted_index[i]])
+                    
+                    aa_data_sorted = torch.stack(aa_data_sorted)
+                   
+                    cds_data_sorted = torch.stack(cds_data_sorted)
+                    
+
+                    aa_data_sorted = aa_data_sorted.to(device)
+                    cds_data_sorted = cds_data_sorted.to(device)
+
+                    #forward pass
+                    output_seq_logits = model(aa_data_sorted, seq_lens, mask=mask)
+
+                    
+                    # Note the output from pad sequence will only contain
+                    # padded sequences till maxm seq length in the current training batch
+                    # So the dimensions error will come if we try to calculate
+                    # loss with output_seq_logits and cds_data.
+                    # Pack pad sequence takes seq length as input and packs and
+                    # when padding packed sequence the pads are added till maxm seq length
+                    # So now the alternative is to remove the extra pads from the cds_data 
+                    # so that it matches the output_seq_logits dimensions
+
+
+                    # Trim padding from cds data to match output_seq_logits dimensions 
+                    # as it is packed padded so containd max len as max seq len in current batch
+                    cds_pad_trimmed = self.get_pad_trimmed_cds_data(cds_data_sorted, max_seq_len)
+            
+                    loss = cross_entropy_loss(output_seq_logits.permute(0,2,1), cds_pad_trimmed.to(device))
+                   
+                    if cai_type != "none":
+                        cai_index = cai_loss(output_seq_logits, seq_lens, device)
+
+                        total_loss = loss - self.lambda_val * cai_index
+                    else:
+                        total_loss = loss
+                
+                    right_tokens, total_tokens = self.get_correct_tags(output_seq_logits, cds_pad_trimmed, seq_lens)
+                    right_tags_train += right_tokens
+                    total_tags_train += total_tokens
+                    # backward pass
+                    optimizer.zero_grad()
+                    total_loss.backward()
+                    # gradient descent
+                    optimizer.step()
+
+                    train_batch_count += 1
+                    train_loss += total_loss.item()
+
+                avg_train_loss = train_loss / len(train_loader)
+                train_losses_epoch.append(avg_train_loss)  
+                accuracy_train = right_tags_train/total_tags_train
+                train_accuracy_epoch.append(accuracy_train)
+
+                # VALIDATION
+                model.eval()
+                val_loss = 0
+                l1_loss_val = 0
+                l2_loss_val = 0
+                val_batch_count = 1
+                right_tags_val = 0
+                total_tags_val = 0
+                with torch.no_grad():
+                
+                    for aa_data, cds_data in val_loader:
+                        
+                        wandb.watch(model, cross_entropy_loss, log=None, log_freq=20)
+                        seq_lens = torch.sum(cds_data != 0, dim=1)
+                        seq_lens, sorted_index = torch.sort(seq_lens, descending=True)
+                        max_seq_len = max(seq_lens)
+
+                        aa_data_sorted = []
+                        cds_data_sorted = []
+                        for i in range(0, len(sorted_index)):
+                            aa_data_sorted.append(aa_data[sorted_index[i]])
+                            cds_data_sorted.append(cds_data[sorted_index[i]])
+                        
+                        aa_data_sorted = torch.stack(aa_data_sorted)
+                        
+                        cds_data_sorted = torch.stack(cds_data_sorted)
+                    
+                        aa_data_sorted = aa_data_sorted.to(device)
+                        cds_data_sorted = cds_data_sorted.to(device)
+
+                        #forward pass
+                        output_seq_logits = model(aa_data_sorted, seq_lens, mask=mask)
+                    
+                        # Trim padding from cds data to match output_seq_logits dimensions
+                        cds_pad_trimmed = self.get_pad_trimmed_cds_data(cds_data_sorted, max_seq_len)
+                       
+                        loss = cross_entropy_loss(output_seq_logits.permute(0,2,1), cds_pad_trimmed.to(device))
+                        
+                        if cai_type != "none":
+                            cai_index = cai_loss(output_seq_logits, seq_lens, device)
+                            total_loss = loss - self.lambda_val * cai_index
+                        else:
+                            total_loss = loss
+                        
+                        right_tokens, total_tokens = self.get_correct_tags(output_seq_logits, cds_pad_trimmed, seq_lens)
+                        right_tags_val += right_tokens
+                        total_tags_val += total_tokens
+
+                        val_loss += total_loss.item()
+                        val_batch_count += 1
+
+
+                avg_val_loss = val_loss / len(val_loader)
+
+                val_losses_epoch.append(avg_val_loss)
+
+
+                accuracy_val = right_tags_val/total_tags_val
+                val_accuracy_epoch.append(accuracy_val)     
+
+                print("\n")
+                wandb.log({"Train Loss": avg_train_loss, "Train Accuracy": accuracy_train, "Validation Loss": avg_val_loss, "Validation Accuracy": accuracy_val})
+                
+                print(f'Epoch = {epoch+1} | Train Loss = {avg_train_loss:.4f} | Train Accuracy = {accuracy_train:.4f} | Validation Loss = {avg_val_loss :.4f} | Validation Accuracy = {accuracy_val:.4f}')
+    
+                # Added checkpointing and Early Stopping
+                if avg_val_loss < best_val_loss or avg_train_loss < best_train_loss:
+                    best_train_loss = min(best_train_loss,avg_train_loss)
+                    patience_counter = 0
+                    if avg_val_loss < best_val_loss:
+                        best_val_loss = avg_val_loss
+                        torch.save({
+                            'epoch': epoch,
+                            'model_state_dict': model.state_dict(),
+                            'optimizer_state_dict': optimizer.state_dict(),
+                            'train_loss': avg_train_loss,
+                            'val_loss': avg_val_loss,
+                            'train_accuracy': accuracy_train,
+                            'val_accuracy': accuracy_val
+                        }, './best_model-ac-ch.pt')
+                else:
+                    patience_counter += 1
+                    if patience_counter > patience:
+                        print("Early Stopping")
+                        break
+                
+                if epoch != num_epochs-1:
+                    print("\n")
+
+            print(".")
+            print(".")
+            print(".")
+            print(".")
+            print("!!!!!!!!!!!!!!!!!!!!!!!!!!!! TRAINING DONE !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! \n")
+
+            torch.save(model.state_dict(), './model.pt')
+
+       
+        
+        
+        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!! TESTING !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! \n")
+        print(".")
+        # Testing
+        checkpoint = torch.load('./best_model-ch/best_model-ac-ch.pt', map_location=torch.device('cpu'))
+        print("<<<<<<<< All CODON-Chinese Hamster >>>>>>>>")
+        model = RNNModel().to(device)
+        model.load_state_dict(checkpoint['model_state_dict'])
+    
+        model.eval()
+        test_loss = 0
+        # l1_loss_test = 0
+        # l2_loss_test = 0
+        test_batch_count = 1
+        right_tags_test = 0
+        total_tags_test = 0
+        total_cai_pred = 0
+        total_cai_original = 0
+        cai_pred_list = []
+        cai_original_list = []
+
+        test_accuracy_epoch = []
+        with torch.no_grad():
+            for i,(aa_data, cds_data) in enumerate(tqdm(test_loader)):
+                # print("\n")
+                seq_lens = torch.sum(cds_data != 0, dim=1)
+               
+                seq_lens, sorted_index = torch.sort(seq_lens, descending=True)
+              
+                max_seq_len = max(seq_lens)
+
+                aa_data_sorted = []
+                cds_data_sorted = []
+                for i in range(0, len(sorted_index)):
+                    aa_data_sorted.append(aa_data[sorted_index[i]])
+                    cds_data_sorted.append(cds_data[sorted_index[i]])
+                
+                aa_data_sorted = torch.stack(aa_data_sorted)
+               
+                cds_data_sorted = torch.stack(cds_data_sorted)
+        
+                aa_data_sorted = aa_data_sorted.to(device)
+                cds_data_sorted = cds_data_sorted.to(device)
+
+                #forward
+                output_seq_logits = model(aa_data_sorted, seq_lens, mask=mask)
+               
+                cai_pred, cai_target = get_batch_cai(output_seq_logits, cds_data_sorted, cds_token_dict, seq_lens, ref_seq_cds, test=True)
+                cai_pred_list += list(cai_pred)
+                cai_original_list += list(cai_target)
+                total_cai_original += torch.sum(cai_target)
+                total_cai_pred += torch.sum(cai_pred)
+
+
+                # Trim padding from cds data to match output_seq_logits dimensions
+                cds_pad_trimmed = self.get_pad_trimmed_cds_data(cds_data_sorted, max_seq_len)
+
+
+                loss = cross_entropy_loss(output_seq_logits.permute(0,2,1), cds_pad_trimmed.to(device))
+
+                if cai_type != "None":
+                    cai_index = cai_loss(output_seq_logits, seq_lens, device)
+                    # print("Batch CAI Loss: ", cai_index.item())
+                    total_loss = loss - self.lambda_val * cai_index
+                else:
+                    total_loss = loss
+                
+                right_tokens, total_tokens = self.get_correct_tags(output_seq_logits, cds_pad_trimmed, seq_lens)
+                right_tags_test += right_tokens
+                total_tags_test += total_tokens
+               
+        test_accuracy = right_tags_test/total_tags_test
+        wandb.log({"Test Accuracy": test_accuracy})
+
+        avg_pred_cai = total_cai_pred/len(test_loader.dataset)
+        avg_original_cai = total_cai_original/len(test_loader.dataset)
+
+        print(f"Test Accuracy =  {test_accuracy:.4f} | Average Predicted CAI = {avg_pred_cai:.4f} | Average Original CAI = {avg_original_cai:.4f}")
+       
+        print("!!!!!!!!!!!!!!!!!!!!!!!!!!!! CREATING CSV !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!! \n")
+        df = pd.read_csv('./ch_cai.csv')
+        df['predicted_cai_ac'] = [cai.item() for cai in cai_pred_list]
+        df['original_cai'] = [cai.item() for cai in cai_original_list]
+
+        # df.drop('Unnamed: 1', axis=1, inplace=True)
+        df.to_csv('./ch_cai.csv', index=False)
+        return train_losses_epoch, val_losses_epoch, train_accuracy_epoch, val_accuracy_epoch, test_accuracy
+
+if __name__ == "__main__":
+    # model = RNNModel()
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--cai_type', type=str, default='None')
+    parser.add_argument('--mask', type=str, default='None')
+    parser.add_argument('--test', type=bool, default=False)
+
+    # To specify the organism for which the model is to be trained and tested
+    parser.add_argument('--organism', type=str, default='human')
+    args = parser.parse_args()
+    cai_type = args.cai_type
+    mask = args.mask
+    organism = args.organism
+
+    dataset_path = ''
+
+    if organism == 'human':
+        dataset_path = './GenesData/hg19.json'
+    elif organism == 'ecoli':
+        dataset_path = './GenesData/ecoli.json'
+    elif organism == 'chinese hamster':
+        dataset_path = './GenesData/ch.json'
+
+    train_obj = Train(dataset_path)
+
+    train_losses_epoch, val_losses_epoch, train_accuracy_epoch, val_accuracy_epoch, test_accuracy = train_obj.train(cai_type=cai_type, mask=mask)

@@ -1,0 +1,125 @@
+import pandas as pd
+from utils.filtering_tests_util import SequenceFilterTest
+from collections import OrderedDict
+import os
+import random
+import json
+
+def define_test():
+    """
+    Here 7 different tests are performed to filter out the sequences
+
+    Test 1: ORF length is divisible by 3
+    Test 2: CDS sequence contains only a, t, c, g
+    Test 3: Start Codon is atg and M is the first amino acid
+    Test 4: Stop Codon is taa, tag, tga
+    Test 5: Amino Acid sequence contains only one stop codon
+    Test 6: Amino Acid sequence contains only amino acid in the list amino_acid
+    Test 7: Amnio Acid Sequence length is multiple of 3 of CDS sequence length
+
+    """
+
+    total_test_failed = {
+        '1': 0,
+        '2': 0,
+        '3': 0,
+        '4': 0,
+        '5': 0,
+        '6': 0,
+        '7': 0
+    }
+    return total_test_failed
+
+def get_data():
+    parent_directory = os.path.abspath(os.path.join(os.getcwd(), '../'))
+    aa_cds_df = pd.read_csv(parent_directory + '/Hg-19/CDS/AA_CDS_STOP.csv')
+    return aa_cds_df
+
+def perform_test(data):
+    
+    total_test_failed = define_test()
+
+    aa_cds_df = data
+
+    filter_test = SequenceFilterTest(aa_cds_df, total_test_failed)
+
+    sequence_failed_id, total_test_failed = filter_test.start_test()
+
+    print('\n')
+    print("<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<FILTERING COMPLETED>>>>>>>>>>>>>>>>>>>>>>>>>>>>>")
+
+
+    num_failed = len(sequence_failed_id)
+    num_passed = len(aa_cds_df) -  num_failed
+
+    print('\n')
+    print("Number of sequences passed:", num_passed)
+
+    print('\n')
+
+    print("Number of sequences failed: ", num_failed)
+    print('\n')
+
+    print("<<<<<<<<<<<<<<<<<<<< NUMBER OF EACH TESTS FAILURE >>>>>>>>>>>>>>")
+    print('\n')
+    for k,v in total_test_failed.items():
+        print(f'TEST-{k} : ', v, ' sequences')
+    print('\n')
+
+    return sequence_failed_id, total_test_failed
+
+def create_json_data(filtered_data):
+
+    orf_sequence = filtered_data['orf_sequence'].tolist()
+    aa_translation = filtered_data['aa_translation'].tolist()
+    
+    # create a dict of aa and cds 
+    aa_cds_dict=    {
+                        orf_sequence[i][:len(orf_sequenc[i]-3)] : aa_translation[i][:-1] 
+                        for i in range(len(orf_sequence))
+                    }
+    
+    #shuffle the dictionary item
+    dict_list = list(aa_cds_dict.items())
+    random.shuffle(dict_list)
+    shuffled_aa_cds_dict = OrderedDict(dict_list)
+
+    # write it to a file
+    with open('./aa_cds_dict.json', 'w') as f:
+        json.dump(shuffled_aa_cds_dict, f)
+    
+    print("<<<<<<<< JSON DATA CREATED : 'aa_cds_dict.json' >>>>>>>>")
+    print('\n')
+
+def create_filtered_data():
+    data = get_data()
+    seq_ids_remove, total_test_failed = perform_test(data)
+
+    print("Number of sequences before: ", len(data))
+    print('\n')
+
+    filtered_data = data[~data['ncbi_id'].isin(seq_ids_remove)]
+    filtered_data.reset_index()
+    print("Number of sequences after filter test:", len(filtered_data))
+    print('\n')
+
+    create_json_data(filtered_data)
+
+def remove_stop_codon(data_path = './aa_cds_dict.json'):
+    with open(data_path) as f:
+        aa_cds_dict = json.load(f)
+    
+    aa_cds_dict_new = {}
+    for k,v in aa_cds_dict.items():
+        cds = k[:-3]
+        aa = v[:-1]
+        aa_cds_dict_new[cds] = aa
+    
+    with open('./aa_cds_dict.json', 'w') as f:
+        json.dump(aa_cds_dict_new, f)
+    
+    print("<<<<<<<< JSON DATA CREATED : 'aa_cds_dict_new.json' >>>>>>>>")
+    print('\n')
+if __name__ == "__main__":
+    # create_filtered_data()
+    remove_stop_codon()

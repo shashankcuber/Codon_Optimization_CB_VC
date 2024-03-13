@@ -1,0 +1,23 @@
+# Ignore all best-model files and Data files
+*.pt
+
+# Ignore all log files
+*.log
+
+# Ignore all pycache files
+__pycache__/
+
+# Ignore all folders having the name of "best-model"
+**/best-model/
+
+# Ignore all folders having the name of Data or data in them
+/GenesData/
+/Data_Scripts/
+/ch_data/
+/hg_19_data/
+/ecoli_data/
+
+
+# Ignore all weights and biases files logs
+wandb/
+

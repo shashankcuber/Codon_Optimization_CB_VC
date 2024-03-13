@@ -1,0 +1,136 @@
+import json
+import random
+from torch.utils.data import Dataset, DataLoader, TensorDataset
+from sklearn.model_selection import train_test_split
+from utils.data_preprocessing_util import DataPreprocessing
+
+class CodonDataset(Dataset):
+    def __init__(self, aa_sequences, cds_sequences):
+        self.aa_seqs = aa_sequences
+        self.cds_seqs = cds_sequences
+    
+    def __len__(self):
+        return len(self.aa_seqs)
+
+    def __getitem__(self, idx):
+        aa_seq = self.aa_seqs[idx]
+        cds_seq = self.cds_seqs[idx]
+        return aa_seq, cds_seq
+
+def read_data_from_file(data_file_path):
+    
+    with open(data_file_path) as f:
+        cds_aa_dict = json.load(f)
+    return cds_aa_dict
+
+def get_tokenized_padded_data(data_preprocess_obj):
+    
+    print("\n")
+    print("################### PREPROCESSING START ####################### \n")
+    aa_seq_tokenized, cds_seq_tokenized, aa_token_dict, cds_token_dict = data_preprocess_obj.preprocess()
+    
+    print("################### PREPROCESSING DONE ######################## \n")
+    return aa_seq_tokenized, cds_seq_tokenized, aa_token_dict, cds_token_dict
+
+def get_train_test_split(aa_seq_tokenized, cds_seq_tokenized, split_ratio):
+   
+    print("################### STARTING TRAIN TEST SPLIT ######################### \n")
+    aa_train, aa_test, cds_train, cds_test = train_test_split(
+        aa_seq_tokenized, cds_seq_tokenized, test_size=split_ratio, random_state=42
+        )
+    print("Number of training + validation samples are ", len(aa_train))
+    print("Number of test samples are ", len(aa_test))
+    print("\n")
+    return aa_train, aa_test, cds_train, cds_test
+
+def get_train_validation_split(aa_train, cds_train, split_ratio):
+    
+    print("################### STARTING TRAIN VALIDATION SPLIT ################### \n")
+    aa_train, aa_val, cds_train, cds_val = train_test_split(
+        aa_train, cds_train, test_size=split_ratio, random_state=42 
+    )
+    print("Number of training samples are ", len(aa_train))
+    print("Number of validation samples are ", len(aa_val))
+    print("\n")
+    return aa_train, aa_val, cds_train, cds_val
+
+def get_train_val_test_dataset(aa_train, aa_val, aa_test, cds_train, cds_val, cds_test):
+    
+    print("################### STARTING DATASET GENERATION ####################### \n")
+    train_dataset = TensorDataset(aa_train, cds_train)
+    val_dataset = TensorDataset(aa_val, cds_val)
+    test_dataset = TensorDataset(aa_test, cds_test)
+
+    print("################### DATASET GENERATION DONE ########################### \n")
+    return train_dataset, val_dataset, test_dataset
+
+def get_train_val_test_dataloaders(train_dataset, val_dataset, test_dataset):
+    
+    print("################### STARTING DATALOADERS GENERATION ################### \n")
+    train_loader = DataLoader(
+        train_dataset, batch_size = 32, shuffle=True)
+    val_loader = DataLoader(
+        val_dataset, batch_size = 32, shuffle=False)
+    test_loader = DataLoader(
+        test_dataset, batch_size = 32, shuffle=False
+    )
+    print("################### DATALOADERS GENERATION DONE ####################### \n")
+    return train_loader, val_loader, test_loader
+
+
+def start_preprocessing(data_file_path):
+    
+    """
+    Summary: 
+        This function preprocesses the data for tokenization and padding and returns the train, validation and test dataloaders
+
+    Args:
+        data_file_path: The path to the data file of specified organism
+    
+    Returns:
+        train_loader: The dataloader for training
+        val_loader: The dataloader for validation
+        test_loader: The dataloader for testing
+        ref_cds_list: The list of reference cds sequences
+        cds_token_dict: The dictionary of codons to index mapping
+    """
+    cds_aa_dict = read_data_from_file(data_file_path)
+    # making separate list of 18100 AA and CDS sequences
+    cds_list = list(cds_aa_dict.keys())
+    aa_list = list(cds_aa_dict.values())
+    # Randomly select 100 sequences from the cds for CAI calculation
+    num_seq = len(cds_list)
+    ref_cds_list = random.sample(cds_list, num_seq)
+    # 38k for ch , 18100 for hg19 
+    cds_list = cds_list[:]
+    aa_list = aa_list[:]
+    
+    
+    data_preprocessing_obj = DataPreprocessing(aa_list, cds_list)
+    aa_seq_tokenized, cds_seq_tokenized, aa_token_dict, cds_token_dict = get_tokenized_padded_data(data_preprocess_obj=data_preprocessing_obj)
+
+    aa_train, aa_test, cds_train, cds_test = get_train_test_split(
+        aa_seq_tokenized, cds_seq_tokenized, split_ratio=0.2
+        )
+   
+    aa_train, aa_val, cds_train, cds_val = get_train_validation_split(
+        aa_train, cds_train, split_ratio=0.2
+    )
+
+
+    train_dataset, val_dataset, test_dataset = get_train_val_test_dataset(
+        aa_train, aa_val, aa_test, cds_train, cds_val, cds_test
+    )
+   
+    train_loader, val_loader, test_loader = get_train_val_test_dataloaders(
+        train_dataset, val_dataset, test_dataset
+    )
+   
+    
+    return train_loader, val_loader, test_loader, ref_cds_list, cds_token_dict
+
+
+if __name__ == '__main__':
+    data_file_path = './aa_cds_dict.json'
+    start_preprocessing(data_file_path=data_file_path)
+    train_loader,val_loader, test_loader, ref_cds_list, cds_token_dict = start_preprocessing(data_file_path=data_file_path)

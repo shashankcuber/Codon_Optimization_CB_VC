@@ -1,0 +1,96 @@
+import random
+from CAI import CAI, relative_adaptiveness, RSCU
+import torch
+
+def remove_pad_from_output(output_seq_logits, cds_data):
+    """
+    Remove padding from the output logits to get the actual predicted logits for the sequences in the batch 
+
+    Args:
+        output_seq_logits: The output logits from the model
+        cds_data: The input sequences in the batch
+
+    Returns:
+        pred_logits_without_pad: The predicted logits without the padding
+    """
+
+    pred_logits_without_pad = []
+    for id, seq in enumerate(cds_data):
+        cnt_zero = 0
+         #check post 0's in cds_data
+        i = len(cds_data[id])-1
+
+        while i>0:
+            if seq[i] == 0:
+                cnt_zero +=1
+            else:
+                break
+            i-=1
+    
+        pred_logits_without_pad.append(output_seq_logits[id][ :len(seq)-cnt_zero+1, : ])
+    
+    return pred_logits_without_pad
+
+
+def convert_index_to_codons(seq_pad_removed, cds_token_dict):
+    """
+    Convert the index to codon sequences
+
+    Args:
+        seq_pad_removed: The sequence with padding removed to convert to codon sequence of real length
+        cds_token_dict: The dictionary of codons to index mapping
+
+    Returns:
+        codon_seq: The codon sequence
+
+    """
+    codon_seq = ""
+    #converting the codon to index dictionary to index to codon dictionary for inference of output sequences
+    index_to_word = {v: k for k, v in cds_token_dict.items()}
+
+    for index in seq_pad_removed:
+       
+        if int(index) == 0:
+            codon_seq += index_to_word[random.choice([i for i in range(1, len(index_to_word))])]
+        else:
+            codon_seq += index_to_word[int(index)]
+   
+    return codon_seq
+
+def get_batch_cai(output_seq_logits, cds_data_sorted, cds_token_dict, seq_lens, ref_seqs, test=False):
+    """
+    Get the batch CAI for the predicted and target sequences during training and testing
+
+    Args:
+        output_seq_logits: The output logits from the model
+        cds_data_sorted: The input sequences in the batch
+        cds_token_dict: The dictionary of codons to index mapping
+        seq_lens: The sequence lengths of the input sequences
+        ref_seqs: The reference sequences for calculating the CAI
+        test: A flag to indicate if the function is called during testing
+    
+    Returns:
+        output_batch_cai: The batch CAI for the predicted sequences
+        target_batch_cai: The batch CAI for the target sequences
+        
+    """
+    output_batch_cai = []
+    target_batch_cai = []
+    predicted_output_logits = torch.argmax(output_seq_logits, dim=-1)
+    
+    weights = relative_adaptiveness(ref_seqs)
+  
+    for i in range(len(seq_lens)):
+        trimmed_output_seq = predicted_output_logits[i][:seq_lens[i]]
+        
+        predicted_seq = convert_index_to_codons(trimmed_output_seq, cds_token_dict)
+      
+        cai_pd = CAI(predicted_seq, weights=weights)
+       
+        output_batch_cai.append(CAI(predicted_seq, weights=weights))
+        if test == True:
+            trimmed_target_seq = cds_data_sorted[i][:seq_lens[i]]
+            target_seq = convert_index_to_codons(trimmed_target_seq, cds_token_dict)
+            target_batch_cai.append(CAI(target_seq, weights=weights))
+    
+    return torch.tensor(output_batch_cai), torch.tensor(target_batch_cai)
